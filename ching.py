@@ -172,7 +172,7 @@ def compare_advanced_audio(file_path_1, file_path_2, label_1="Real", label_2="Su
         print(" The vocal timbre matches, but the physical artifacts fail.")
         print("=" * 65 + "\n")
     
-    display(df_styled)
+    print(df)
     return fp_1, fp_2
 # --- EXECUTION ---
 if __name__ == "__main__":
