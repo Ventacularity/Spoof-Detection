@@ -371,8 +371,62 @@ def main():
         d['Author'] = 'Ved, Ching, Erick — EE 123'
         d['Subject'] = 'Real vs Voice Converted Audio Comparison'
 
+    # ── Write TXT summary ──
+    txt_path = os.path.join(AUDIO_DIR, "feature_tables.txt")
+    with open(txt_path, "w") as f:
+        f.write("SPARC Spoof Detection — Feature Comparison Tables\n")
+        f.write("EE 123 Project — Ved, Ching, Erick\n")
+        f.write("=" * 65 + "\n\n")
+
+        col_w = [22, 10, 10, 8]
+        header = f"{'Feature':<{col_w[0]}} {'Real':>{col_w[1]}} {'Spoof':>{col_w[2]}} {'Diff%':>{col_w[3]}}"
+        divider = "-" * 65
+
+        for i in range(NUM_PAIRS):
+            real_path = os.path.join(AUDIO_DIR, f"r{i+1}.wav")
+            spoof_path = os.path.join(AUDIO_DIR, f"try{i+1}.wav")
+            if not os.path.exists(real_path) or not os.path.exists(spoof_path):
+                continue
+
+            fv_r = all_physics_real[i]
+            fv_s = all_physics_spoof[i]
+            pv_r = all_phase_real[i]
+            pv_s = all_phase_spoof[i]
+
+            f.write(f"PAIR {i+1}: r{i+1}.wav  vs  try{i+1}.wav\n")
+            f.write(divider + "\n")
+            f.write(header + "\n")
+            f.write(divider + "\n")
+
+            all_feat_names = PHYSICS_NAMES + ["Phase Var (mean)"]
+            all_real_vals = list(fv_r) + [pv_r]
+            all_spoof_vals = list(fv_s) + [pv_s]
+
+            for name, rv, sv in zip(all_feat_names, all_real_vals, all_spoof_vals):
+                diff = abs(rv - sv) / (abs(rv) + 1e-8) * 100
+                f.write(f"{name:<{col_w[0]}} {rv:>{col_w[1]}.4f} {sv:>{col_w[2]}.4f} {diff:>{col_w[3]}.1f}%\n")
+
+            f.write("\n")
+
+        # Summary averages
+        f.write("=" * 65 + "\n")
+        f.write("SUMMARY: Average across all pairs\n")
+        f.write("=" * 65 + "\n")
+        f.write(header + "\n")
+        f.write(divider + "\n")
+        mean_r = np.mean(all_physics_real, axis=0)
+        mean_s = np.mean(all_physics_spoof, axis=0)
+        mean_pv_r = np.mean(all_phase_real)
+        mean_pv_s = np.mean(all_phase_spoof)
+        all_feat_names = PHYSICS_NAMES + ["Phase Var (mean)"]
+        all_mean_r = list(mean_r) + [mean_pv_r]
+        all_mean_s = list(mean_s) + [mean_pv_s]
+        for name, rv, sv in zip(all_feat_names, all_mean_r, all_mean_s):
+            diff = abs(rv - sv) / (abs(rv) + 1e-8) * 100
+            f.write(f"{name:<{col_w[0]}} {rv:>{col_w[1]}.4f} {sv:>{col_w[2]}.4f} {diff:>{col_w[3]}.1f}%\n")
+
     print(f"\n✅ Done! Report saved to:\n   {OUTPUT_PDF}")
-    print(f"   Open it to view all 8 pair comparisons + summary.")
+    print(f"   Feature tables saved to:\n   {txt_path}")
 
 
 if __name__ == "__main__":

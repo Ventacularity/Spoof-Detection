@@ -7,13 +7,21 @@ Real samples: r1.wav - r12.wav  (label: 0)
 Spoof samples: try1.wav - try8.wav (label: 1)
 
 Uses leave-one-out cross validation since we have few samples.
-Trains only on physics features (not MFCCs) to avoid overfitting.
+
+Based on feature_tables.txt analysis across 8 pairs:
+  - Modulation Energy: real > spoof in 7/8 pairs, 21% avg diff  <- BEST
+  - Glottal Kurtosis:  real > spoof in 6/8 pairs, 17% avg diff  <- GOOD
+  - Glottal Std:       real > spoof in 7/8 pairs, 13% avg diff  <- GOOD
+  - Phase Variance:    0.0% avg diff                            <- DROPPED
+  - Rolloff Std:       flips direction, 1.1% avg diff           <- DROPPED
+  - ZCR Std:           speaker-dependent, not spoof-dependent   <- DROPPED
+  - Aliasing Mean:     speaker-dependent, inconsistent          <- DROPPED
 
 Usage:
     python Ved-Trainer.py
-    
+
 Output:
-    model.pkl  — saved logistic regression + scaler
+    model.pkl  -- saved logistic regression + scaler
 """
 
 import os
@@ -27,21 +35,27 @@ from sklearn.metrics import classification_report, confusion_matrix
 from ching import build_advanced_feature_vector
 
 # ─────────────────────────────────────────────
-# CONFIG — change this path if needed
-AUDIO_DIR = os.path.dirname(os.path.abspath(__file__))  # same folder as this script
+AUDIO_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Physics feature indices (from ching.py's 128-dim vector)
-# These are indices 120 onwards: glottal kurtosis, glottal std, flux std,
-# modulation energy, rolloff std, ZCR std, aliasing mean, aliasing std
+# Physics block starts at index 120 in ching.py's feature vector:
+# 120: Glottal Kurtosis  <- GOOD   (real > spoof in 6/8, 17% avg diff)
+# 121: Glottal Std       <- GOOD   (real > spoof in 7/8, 13% avg diff)
+# 122: Spectral Flux Std <- WEAK   (6.5% avg diff, inconsistent direction)
+# 123: Modulation Energy <- BEST   (real > spoof in 7/8, 21% avg diff)
+# 124: Rolloff Std       <- DROPPED (flips direction, only 1.1% avg diff)
+# 125: ZCR Std           <- DROPPED (speaker-dependent, not spoof-dependent)
+# 126: Aliasing Mean     <- DROPPED (speaker-dependent, inconsistent)
+# Phase Variance         <- DROPPED (0.0% avg diff, completely useless)
+#
+# Decision rule: real voices have HIGHER values for all 3 selected features.
+# Lower values = more likely SPARC vocoder output = spoof.
 PHYSICS_START = 120
+SELECTED_INDICES = [0, 1, 3]  # Glottal Kurtosis, Glottal Std, Modulation Energy
+SELECTED_NAMES = ["Glottal Kurtosis", "Glottal Std", "Modulation Energy"]
 # ─────────────────────────────────────────────
 
 
 def load_dataset(audio_dir):
-    """
-    Loads all r*.wav (real) and try*.wav (spoof) files from the given directory.
-    Returns feature matrix X and label vector y.
-    """
     real_files = sorted(glob.glob(os.path.join(audio_dir, "r*.wav")))
     spoof_files = sorted(glob.glob(os.path.join(audio_dir, "try*.wav")))
 
@@ -54,10 +68,7 @@ def load_dataset(audio_dir):
     print(f"Found {len(real_files)} real files and {len(spoof_files)} spoof files.")
     print(f"Total samples: {len(real_files) + len(spoof_files)}\n")
 
-    X = []
-    y = []
-    filenames = []
-
+    X, y, filenames = [], [], []
     all_files = [(f, 0) for f in real_files] + [(f, 1) for f in spoof_files]
 
     for filepath, label in all_files:
@@ -70,39 +81,28 @@ def load_dataset(audio_dir):
             y.append(label)
             filenames.append(filename)
         except Exception as e:
-            print(f"  ⚠️  Skipping {filename}: {e}")
+            print(f"  Warning: Skipping {filename}: {e}")
 
-    X = np.array(X)
-    y = np.array(y)
-
-    return X, y, filenames
+    return np.array(X), np.array(y), filenames
 
 
-def evaluate_loocv(X_physics, y, filenames):
-    """
-    Leave-One-Out Cross Validation.
-    With only 20 samples, this is the most honest evaluation we can do.
-    Each iteration: train on 19 samples, test on the 1 left out.
-    """
-    print("\n" + "=" * 55)
+def evaluate_loocv(X_selected, y, filenames):
+    print("\n" + "=" * 60)
     print("   LEAVE-ONE-OUT CROSS VALIDATION")
-    print("=" * 55)
+    print(f"   Features used: {SELECTED_NAMES}")
+    print("=" * 60)
 
     loo = LeaveOneOut()
-    y_true = []
-    y_pred = []
-    y_prob = []
+    y_true, y_pred, y_prob = [], [], []
 
-    for train_idx, test_idx in loo.split(X_physics):
-        X_train, X_test = X_physics[train_idx], X_physics[test_idx]
+    for train_idx, test_idx in loo.split(X_selected):
+        X_train, X_test = X_selected[train_idx], X_selected[test_idx]
         y_train, y_test = y[train_idx], y[test_idx]
 
-        # Scale inside the loop to prevent data leakage
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
 
-        # Train logistic regression
         clf = LogisticRegression(max_iter=1000, random_state=42)
         clf.fit(X_train_scaled, y_train)
 
@@ -114,8 +114,8 @@ def evaluate_loocv(X_physics, y, filenames):
         y_prob.append(prob)
 
         label_str = "REAL " if y_test[0] == 0 else "SPOOF"
-        result_str = "✅ correct" if pred == y_test[0] else "❌ wrong"
-        print(f"  [{label_str}] {filenames[test_idx[0]]:<15} → prob={prob:.3f}  {result_str}")
+        result_str = "correct" if pred == y_test[0] else "WRONG"
+        print(f"  [{label_str}] {filenames[test_idx[0]]:<15} -> prob={prob:.3f}  {result_str}")
 
     y_true = np.array(y_true)
     y_pred = np.array(y_pred)
@@ -126,72 +126,63 @@ def evaluate_loocv(X_physics, y, filenames):
 
     print(f"\n  Overall LOOCV Accuracy: {correct}/{total} = {accuracy:.1f}%")
     print("\n" + classification_report(y_true, y_pred, target_names=["Real", "Spoof"]))
-    print("Confusion Matrix:")
-    print(confusion_matrix(y_true, y_pred))
+    print("Confusion Matrix (rows=actual, cols=predicted):")
+    print("               Pred:Real  Pred:Spoof")
+    cm = confusion_matrix(y_true, y_pred)
+    print(f"  Actual:Real      {cm[0][0]}          {cm[0][1]}")
+    print(f"  Actual:Spoof     {cm[1][0]}          {cm[1][1]}")
 
     return accuracy
 
 
-def train_final_model(X_physics, y):
-    """
-    Train the final model on ALL available data.
-    This is what gets saved to disk for inference.
-    """
-    print("\n" + "=" * 55)
+def train_final_model(X_selected, y):
+    print("\n" + "=" * 60)
     print("   TRAINING FINAL MODEL ON ALL DATA")
-    print("=" * 55)
+    print("=" * 60)
 
     scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X_physics)
+    X_scaled = scaler.fit_transform(X_selected)
 
     clf = LogisticRegression(max_iter=1000, random_state=42)
     clf.fit(X_scaled, y)
 
     print(f"  Trained on {len(y)} samples ({np.sum(y==0)} real, {np.sum(y==1)} spoof)")
-    print(f"  Physics feature coefficients:")
-    feature_names = [
-        "Glottal Kurtosis", "Glottal Std", "Spectral Flux Std",
-        "Modulation Energy", "Rolloff Std", "ZCR Std",
-        "Aliasing Mean", "Aliasing Std"
-    ]
-    for name, coef in zip(feature_names, clf.coef_[0]):
-        direction = "↑ spoof" if coef > 0 else "↓ real"
-        print(f"    {name:<22}: {coef:+.4f}  ({direction})")
+    print(f"  Feature coefficients:")
+    for name, coef in zip(SELECTED_NAMES, clf.coef_[0]):
+        direction = "spoof" if coef > 0 else "real"
+        print(f"    {name:<22}: {coef:+.4f}  (higher = {direction})")
 
     return clf, scaler
 
 
 def main():
-    print("=" * 55)
-    print("   Ved-Trainer — SPARC Spoof Detector Retrainer")
-    print("   EE 123 Project — Ved, Ching, Erick")
-    print("=" * 55 + "\n")
+    print("=" * 60)
+    print("   Ved-Trainer -- SPARC Spoof Detector Retrainer")
+    print("   EE 123 Project -- Ved, Ching, Erick")
+    print("=" * 60 + "\n")
 
-    # 1. Load dataset
     print("[1/4] Loading audio files and extracting features...")
     X, y, filenames = load_dataset(AUDIO_DIR)
 
-    # 2. Slice out physics features only
-    print(f"\n[2/4] Isolating physics features (indices {PHYSICS_START}+)...")
+    print(f"\n[2/4] Selecting features: {SELECTED_NAMES}")
     X_physics = X[:, PHYSICS_START:]
-    print(f"      Feature dims: {X.shape[1]} total → {X_physics.shape[1]} physics features used")
+    X_selected = X_physics[:, SELECTED_INDICES]
+    print(f"      Full vector: {X.shape[1]} dims -> physics: {X_physics.shape[1]} -> selected: {X_selected.shape[1]}")
 
-    # 3. Evaluate with LOOCV
     print("\n[3/4] Running Leave-One-Out Cross Validation...")
-    accuracy = evaluate_loocv(X_physics, y, filenames)
+    accuracy = evaluate_loocv(X_selected, y, filenames)
 
-    # 4. Train final model on all data and save
     print("\n[4/4] Training final model and saving...")
-    clf, scaler = train_final_model(X_physics, y)
+    clf, scaler = train_final_model(X_selected, y)
 
     model_path = os.path.join(AUDIO_DIR, "model.pkl")
-    joblib.dump((clf, scaler), model_path)
-    print(f"\n  ✅ Saved model to: {model_path}")
+    joblib.dump((clf, scaler, SELECTED_INDICES, PHYSICS_START), model_path)
+    print(f"\n  Saved model to: {model_path}")
 
-    print("\n" + "=" * 55)
-    print(f"   DONE — LOOCV Accuracy: {accuracy:.1f}%")
+    print("\n" + "=" * 60)
+    print(f"   DONE -- LOOCV Accuracy: {accuracy:.1f}%")
     print("   Run inference.py to test on new audio files.")
-    print("=" * 55)
+    print("=" * 60)
 
 
 if __name__ == "__main__":
