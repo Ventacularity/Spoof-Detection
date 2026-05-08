@@ -3,25 +3,37 @@ Ved-Trainer.py - Spoof Detector Retrainer
 EE 123 Project - Ved, Ching, Erick
 
 Trains a logistic regression on SPARC voice conversion samples.
-Real samples: r1.wav - r12.wav  (label: 0)
-Spoof samples: try1.wav - try8.wav (label: 1)
 
-Uses leave-one-out cross validation since we have few samples.
+Dataset (inside Samples/ folder):
+  Real:  source-vctk1k/  (1000 files)
+         target-vctk1k/  (1000 files)
+  Spoof: converted-vctk1k/ (1000 files)
 
-Based on feature_tables.txt analysis across 8 pairs:
-  - Modulation Energy: real > spoof in 7/8 pairs, 21% avg diff  <- BEST
-  - Glottal Kurtosis:  real > spoof in 6/8 pairs, 17% avg diff  <- GOOD
-  - Glottal Std:       real > spoof in 7/8 pairs, 13% avg diff  <- GOOD
-  - Phase Variance:    0.0% avg diff                            <- DROPPED
-  - Rolloff Std:       flips direction, 1.1% avg diff           <- DROPPED
-  - ZCR Std:           speaker-dependent, not spoof-dependent   <- DROPPED
-  - Aliasing Mean:     speaker-dependent, inconsistent          <- DROPPED
+Features used (from feature_analysis.txt — 1000 pair analysis):
+  KEEP:
+  - ZCR Std          d=1.214  consistency=93.8%  <- NEW #1 (was wrongly dropped)
+  - Glottal Kurtosis d=1.015  consistency=81.5%  <- confirmed good
+  - Aliasing Mean    d=1.004  consistency=91.6%  <- NEW #3 (was wrongly dropped)
+  - Spectral Flux    d=0.959  consistency=79.2%  <- NEW #4 (was wrongly dropped)
+  - Modulation Energy d=0.352 consistency=60.5%  <- weakest keeper
+  DROP:
+  - Rolloff Std      d=0.293  consistency=59.4%  <- below threshold
+  - Glottal Std      d=0.132  consistency=55.0%  <- basically coin flip
+
+Physics block indices (relative to index 120):
+  0: Glottal Kurtosis  <- KEEP
+  1: Glottal Std       <- DROP
+  2: Spectral Flux Std <- KEEP
+  3: Modulation Energy <- KEEP
+  4: Rolloff Std       <- DROP
+  5: ZCR Std           <- KEEP
+  6: Aliasing Mean     <- KEEP
 
 Usage:
     python Ved-Trainer.py
 
 Output:
-    model.pkl  -- saved logistic regression + scaler
+    model.pkl - saved logistic regression + scaler
 """
 
 import os
@@ -30,107 +42,97 @@ import numpy as np
 import joblib
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import LeaveOneOut
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import StratifiedKFold, cross_val_predict
 from sklearn.metrics import classification_report, confusion_matrix
 from ching import build_advanced_feature_vector
 
 # ─────────────────────────────────────────────
 AUDIO_DIR = os.path.dirname(os.path.abspath(__file__))
+SAMPLES_DIR = os.path.join(AUDIO_DIR, "Samples")
 
-# Physics block starts at index 120 in ching.py's feature vector:
-# 120: Glottal Kurtosis  <- GOOD   (real > spoof in 6/8, 17% avg diff)
-# 121: Glottal Std       <- GOOD   (real > spoof in 7/8, 13% avg diff)
-# 122: Spectral Flux Std <- WEAK   (6.5% avg diff, inconsistent direction)
-# 123: Modulation Energy <- BEST   (real > spoof in 7/8, 21% avg diff)
-# 124: Rolloff Std       <- DROPPED (flips direction, only 1.1% avg diff)
-# 125: ZCR Std           <- DROPPED (speaker-dependent, not spoof-dependent)
-# 126: Aliasing Mean     <- DROPPED (speaker-dependent, inconsistent)
-# Phase Variance         <- DROPPED (0.0% avg diff, completely useless)
-#
-# Decision rule: real voices have HIGHER values for all 3 selected features.
-# Lower values = more likely SPARC vocoder output = spoof.
+SOURCE_DIR    = os.path.join(SAMPLES_DIR, "source-vctk1k")
+TARGET_DIR    = os.path.join(SAMPLES_DIR, "target-vctk1k")
+CONVERTED_DIR = os.path.join(SAMPLES_DIR, "converted-vctk1k")
+
 PHYSICS_START = 120
-SELECTED_INDICES = [0, 1, 3]  # Glottal Kurtosis, Glottal Std, Modulation Energy
-SELECTED_NAMES = ["Glottal Kurtosis", "Glottal Std", "Modulation Energy"]
+# Updated based on 1000-pair feature_analysis.txt
+SELECTED_INDICES = [0, 2, 3, 5, 6]  # Glottal Kurtosis, Spectral Flux, Modulation Energy, ZCR Std, Aliasing Mean
+SELECTED_NAMES = ["Glottal Kurtosis", "Spectral Flux Std", "Modulation Energy", "ZCR Std", "Aliasing Mean"]
+
+CV_FOLDS = 5
 # ─────────────────────────────────────────────
 
 
-def load_dataset(audio_dir):
-    real_files = sorted(glob.glob(os.path.join(audio_dir, "r*.wav")))
-    spoof_files = sorted(glob.glob(os.path.join(audio_dir, "try*.wav")))
+def extract_features_from_folder(folder, label, label_str):
+    files = sorted(glob.glob(os.path.join(folder, "*.wav")))
+    X, y, names = [], [], []
+    errors = 0
 
-    if len(real_files) == 0 or len(spoof_files) == 0:
-        raise FileNotFoundError(
-            f"Could not find audio files in {audio_dir}.\n"
-            f"Make sure r1.wav-r12.wav and try1.wav-try8.wav are in the same folder."
-        )
-
-    print(f"Found {len(real_files)} real files and {len(spoof_files)} spoof files.")
-    print(f"Total samples: {len(real_files) + len(spoof_files)}\n")
-
-    X, y, filenames = [], [], []
-    all_files = [(f, 0) for f in real_files] + [(f, 1) for f in spoof_files]
-
-    for filepath, label in all_files:
+    for i, filepath in enumerate(files):
         filename = os.path.basename(filepath)
-        label_str = "REAL" if label == 0 else "SPOOF"
-        print(f"  Extracting [{label_str}] {filename}...")
+        if (i + 1) % 100 == 0:
+            print(f"    [{label_str}] {i+1}/{len(files)} processed ({errors} errors)...")
         try:
             features = build_advanced_feature_vector(filepath)
             X.append(features)
             y.append(label)
-            filenames.append(filename)
+            names.append(filename)
         except Exception as e:
-            print(f"  Warning: Skipping {filename}: {e}")
+            errors += 1
 
-    return np.array(X), np.array(y), filenames
+    print(f"    [{label_str}] Done: {len(X)} extracted, {errors} skipped.")
+    return X, y, names
 
 
-def evaluate_loocv(X_selected, y, filenames):
+def load_dataset():
+    print(f"  Loading from: {SAMPLES_DIR}\n")
+
+    print(f"  [1/3] Source (real): {SOURCE_DIR}")
+    X_src, y_src, n_src = extract_features_from_folder(SOURCE_DIR, 0, "REAL/source")
+
+    print(f"\n  [2/3] Target (real): {TARGET_DIR}")
+    X_tgt, y_tgt, n_tgt = extract_features_from_folder(TARGET_DIR, 0, "REAL/target")
+
+    print(f"\n  [3/3] Converted (spoof): {CONVERTED_DIR}")
+    X_spf, y_spf, n_spf = extract_features_from_folder(CONVERTED_DIR, 1, "SPOOF")
+
+    X = np.array(X_src + X_tgt + X_spf)
+    y = np.array(y_src + y_tgt + y_spf)
+    names = n_src + n_tgt + n_spf
+
+    n_real = len(X_src) + len(X_tgt)
+    n_spoof = len(X_spf)
+    print(f"\n  Total: {len(X)} samples ({n_real} real, {n_spoof} spoof)")
+    return X, y, names
+
+
+def evaluate_kfold(X_selected, y):
     print("\n" + "=" * 60)
-    print("   LEAVE-ONE-OUT CROSS VALIDATION")
-    print(f"   Features used: {SELECTED_NAMES}")
+    print(f"   {CV_FOLDS}-FOLD STRATIFIED CROSS VALIDATION")
+    print(f"   Features: {SELECTED_NAMES}")
     print("=" * 60)
 
-    loo = LeaveOneOut()
-    y_true, y_pred, y_prob = [], [], []
+    pipeline = Pipeline([
+        ('scaler', StandardScaler()),
+        ('clf', LogisticRegression(max_iter=1000, random_state=42))
+    ])
 
-    for train_idx, test_idx in loo.split(X_selected):
-        X_train, X_test = X_selected[train_idx], X_selected[test_idx]
-        y_train, y_test = y[train_idx], y[test_idx]
+    cv = StratifiedKFold(n_splits=CV_FOLDS, shuffle=True, random_state=42)
+    y_pred = cross_val_predict(pipeline, X_selected, y, cv=cv)
 
-        scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
-
-        clf = LogisticRegression(max_iter=1000, random_state=42)
-        clf.fit(X_train_scaled, y_train)
-
-        prob = clf.predict_proba(X_test_scaled)[0][1]
-        pred = int(prob >= 0.5)
-
-        y_true.append(y_test[0])
-        y_pred.append(pred)
-        y_prob.append(prob)
-
-        label_str = "REAL " if y_test[0] == 0 else "SPOOF"
-        result_str = "correct" if pred == y_test[0] else "WRONG"
-        print(f"  [{label_str}] {filenames[test_idx[0]]:<15} -> prob={prob:.3f}  {result_str}")
-
-    y_true = np.array(y_true)
-    y_pred = np.array(y_pred)
-
-    correct = np.sum(y_true == y_pred)
-    total = len(y_true)
+    correct = np.sum(y_pred == y)
+    total = len(y)
     accuracy = correct / total * 100
 
-    print(f"\n  Overall LOOCV Accuracy: {correct}/{total} = {accuracy:.1f}%")
-    print("\n" + classification_report(y_true, y_pred, target_names=["Real", "Spoof"]))
+    print(f"\n  Overall {CV_FOLDS}-Fold Accuracy: {correct}/{total} = {accuracy:.1f}%\n")
+    print(classification_report(y, y_pred, target_names=["Real", "Spoof"]))
+
+    cm = confusion_matrix(y, y_pred)
     print("Confusion Matrix (rows=actual, cols=predicted):")
-    print("               Pred:Real  Pred:Spoof")
-    cm = confusion_matrix(y_true, y_pred)
-    print(f"  Actual:Real      {cm[0][0]}          {cm[0][1]}")
-    print(f"  Actual:Spoof     {cm[1][0]}          {cm[1][1]}")
+    print(f"               Pred:Real  Pred:Spoof")
+    print(f"  Actual:Real    {cm[0][0]:>6}      {cm[0][1]:>6}")
+    print(f"  Actual:Spoof   {cm[1][0]:>6}      {cm[1][1]:>6}")
 
     return accuracy
 
@@ -161,16 +163,23 @@ def main():
     print("   EE 123 Project -- Ved, Ching, Erick")
     print("=" * 60 + "\n")
 
+    for folder in [SOURCE_DIR, TARGET_DIR, CONVERTED_DIR]:
+        if not os.path.exists(folder):
+            print(f"ERROR: Could not find folder: {folder}")
+            print(f"Make sure the Samples/ folder is in the same directory as Ved-Trainer.py")
+            return
+
     print("[1/4] Loading audio files and extracting features...")
-    X, y, filenames = load_dataset(AUDIO_DIR)
+    print("      (This will take a while -- ~3000 files to process)\n")
+    X, y, filenames = load_dataset()
 
     print(f"\n[2/4] Selecting features: {SELECTED_NAMES}")
     X_physics = X[:, PHYSICS_START:]
     X_selected = X_physics[:, SELECTED_INDICES]
     print(f"      Full vector: {X.shape[1]} dims -> physics: {X_physics.shape[1]} -> selected: {X_selected.shape[1]}")
 
-    print("\n[3/4] Running Leave-One-Out Cross Validation...")
-    accuracy = evaluate_loocv(X_selected, y, filenames)
+    print(f"\n[3/4] Running {CV_FOLDS}-Fold Cross Validation...")
+    accuracy = evaluate_kfold(X_selected, y)
 
     print("\n[4/4] Training final model and saving...")
     clf, scaler = train_final_model(X_selected, y)
@@ -180,8 +189,8 @@ def main():
     print(f"\n  Saved model to: {model_path}")
 
     print("\n" + "=" * 60)
-    print(f"   DONE -- LOOCV Accuracy: {accuracy:.1f}%")
-    print("   Run inference.py to test on new audio files.")
+    print(f"   DONE -- CV Accuracy: {accuracy:.1f}%")
+    print("   Run inference.py or batch_test.py to test on audio.")
     print("=" * 60)
 
 
