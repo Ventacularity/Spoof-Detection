@@ -524,6 +524,132 @@ def make_waveform_spectrogram_page(pdf, pairs_data, title):
     ax.legend(fontsize=8); ax.grid(True, alpha=0.3); ax.set_facecolor("#f0f4f8")
     ax.tick_params(axis='x', rotation=30)
 
+
+def make_averaged_signal_page(pdf, real_files, spoof_files, title, n_sample=50):
+    """
+    Averaged signal analysis page — shows averaged spectrogram magnitude,
+    averaged spectral centroid, and averaged phase variance across many files.
+    Samples n_sample files from each class.
+    """
+    import random
+    random.seed(42)
+    sample_real  = random.sample(real_files,  min(n_sample, len(real_files)))
+    sample_spoof = random.sample(spoof_files, min(n_sample, len(spoof_files)))
+
+    def accumulate(files):
+        mags = []; pvs = []; cents = []
+        freqs_ref = times_ref = None
+        target_len = 80
+        for f in files:
+            try:
+                y, sr = load_audio(f)
+                freqs, times, mag, pv, cent = compute_stft(y, sr)
+                if mag.shape[1] < target_len:
+                    continue  # skip files shorter than target
+                if freqs_ref is None:
+                    freqs_ref = freqs
+                    times_ref = times[:target_len]
+                mags.append(mag[:, :target_len])
+                pvs.append(pv[:target_len])
+                cents.append(cent[:target_len])
+            except Exception:
+                pass
+        return (np.mean(np.array(mags),  axis=0) if mags  else None,
+                np.mean(np.array(pvs),   axis=0) if pvs   else None,
+                np.mean(np.array(cents), axis=0) if cents  else None,
+                freqs_ref, times_ref)
+
+    print(f"    Accumulating real signals ({len(sample_real)} files)...")
+    mag_r, pv_r, cent_r, freqs, times = accumulate(sample_real)
+    print(f"    Accumulating spoof signals ({len(sample_spoof)} files)...")
+    mag_s, pv_s, cent_s, _, _ = accumulate(sample_spoof)
+
+    fig, axes = plt.subplots(3, 2, figsize=(20, 16))
+    fig.patch.set_facecolor(BG_COLOR)
+    fig.suptitle(title, fontsize=15, fontweight="bold", color=DARK_COLOR, y=0.98)
+
+    # Averaged spectrograms
+    for col, (mag, label, color) in enumerate([
+        (mag_r, f"REAL (avg of {len(sample_real)} files)",  REAL_COLOR),
+        (mag_s, f"SPOOF (avg of {len(sample_spoof)} files)", SPOOF_COLOR),
+    ]):
+        ax = axes[0, col]
+        if mag is not None:
+            mag_db = 20 * np.log10(mag + 1e-8)
+            im = ax.pcolormesh(times, freqs, mag_db, shading="auto",
+                               cmap="inferno",
+                               vmin=mag_db.max()-60, vmax=mag_db.max())
+            ax.set_ylim(0, 8000)
+            plt.colorbar(im, ax=ax, label="dB", pad=0.01)
+        ax.set_title(f"Averaged Spectrogram — {label}",
+                     fontweight="bold", color=color)
+        ax.set_xlabel("Time (frames)"); ax.set_ylabel("Freq (Hz)")
+        ax.set_facecolor("#f0f4f8")
+
+    # Averaged phase variance
+    ax = axes[1, 0]
+    if pv_r is not None and pv_s is not None:
+        ax.plot(times, pv_r, color=REAL_COLOR,  lw=1.5, alpha=0.9,
+                label=f"Real  (mean={pv_r.mean():.3f})")
+        ax.plot(times, pv_s, color=SPOOF_COLOR, lw=1.5, alpha=0.9,
+                label=f"Spoof (mean={pv_s.mean():.3f})")
+        ax.axhline(pv_r.mean(), color=REAL_COLOR,  ls="--", lw=0.8, alpha=0.5)
+        ax.axhline(pv_s.mean(), color=SPOOF_COLOR, ls="--", lw=0.8, alpha=0.5)
+    ax.set_title("Averaged Phase Variance per Frame", fontweight="bold")
+    ax.set_xlabel("Time (frames)"); ax.set_ylabel("Phase Variance")
+    ax.legend(fontsize=9); ax.grid(True, alpha=0.3); ax.set_facecolor("#f0f4f8")
+
+    # Averaged spectral centroid
+    ax = axes[1, 1]
+    if cent_r is not None and cent_s is not None:
+        ax.plot(times, cent_r, color=REAL_COLOR,  lw=1.5, alpha=0.9,
+                label=f"Real  (mean={cent_r.mean():.0f} Hz)")
+        ax.plot(times, cent_s, color=SPOOF_COLOR, lw=1.5, alpha=0.9,
+                label=f"Spoof (mean={cent_s.mean():.0f} Hz)")
+    ax.set_title("Averaged Spectral Centroid per Frame", fontweight="bold")
+    ax.set_xlabel("Time (frames)"); ax.set_ylabel("Freq (Hz)")
+    ax.legend(fontsize=9); ax.grid(True, alpha=0.3); ax.set_facecolor("#f0f4f8")
+
+    # Averaged magnitude spectrum (frequency profile)
+    ax = axes[2, 0]
+    if mag_r is not None and mag_s is not None:
+        avg_mag_r = mag_r.mean(axis=1)
+        avg_mag_s = mag_s.mean(axis=1)
+        ax.plot(freqs, 20*np.log10(avg_mag_r+1e-8),
+                color=REAL_COLOR,  lw=1.5, label="Real")
+        ax.plot(freqs, 20*np.log10(avg_mag_s+1e-8),
+                color=SPOOF_COLOR, lw=1.5, label="Spoof")
+        ax.fill_between(freqs,
+                        20*np.log10(avg_mag_r+1e-8),
+                        20*np.log10(avg_mag_s+1e-8),
+                        alpha=0.15, color="#8e44ad",
+                        label="Difference")
+    ax.set_title("Averaged Magnitude Spectrum (dB)\n"
+                 "Shows which frequencies differ between real and spoof",
+                 fontweight="bold")
+    ax.set_xlabel("Frequency (Hz)"); ax.set_ylabel("Magnitude (dB)")
+    ax.set_xlim(0, 8000)
+    ax.legend(fontsize=9); ax.grid(True, alpha=0.3); ax.set_facecolor("#f0f4f8")
+
+    # Phase variance difference
+    ax = axes[2, 1]
+    if pv_r is not None and pv_s is not None:
+        diff = pv_r - pv_s
+        ax.plot(times, diff, color="#8e44ad", lw=1.2, alpha=0.9)
+        ax.axhline(0, color="black", ls="--", lw=1.0)
+        ax.fill_between(times, diff, 0,
+                        where=diff > 0, color=REAL_COLOR,  alpha=0.3,
+                        label="Real > Spoof")
+        ax.fill_between(times, diff, 0,
+                        where=diff < 0, color=SPOOF_COLOR, alpha=0.3,
+                        label="Spoof > Real")
+        ax.set_title("Phase Variance Difference (Real − Spoof)\n"
+                     "Positive = real has higher phase variance",
+                     fontweight="bold")
+        ax.set_xlabel("Time (frames)"); ax.set_ylabel("Δ Phase Variance")
+        ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3); ax.set_facecolor("#f0f4f8")
+
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     pdf.savefig(fig, facecolor=fig.get_facecolor())
     plt.close(fig)

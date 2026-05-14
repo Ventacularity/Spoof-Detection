@@ -2,20 +2,23 @@
 report1000.py - VCTK 1000-Pair Dataset Analysis
 EE 123 Project - Ved, Ching, Erick
 
-Evaluates trained models on the full VCTK source/converted dataset.
-  Real  : Samples/source-vctk1k/ (1000 files)
-  Spoof : Samples/converted-vctk1k/ (1000 files)
-
-Note: target-vctk1k/ was used for training, not tested here.
-
-Output:
-  report1000.pdf
+Pages (identical structure to report500.py):
+  1. Cover
+  2. Feature discriminability (Cohen's d)
+  3. Feature stats table (raw counts)
+  4. Averaged signal analysis (spectrogram, phase var, centroid, spectrum)
+  5. Signal summary (phase var per pair, physics, % diff, LR/XGB prob)
+  6. Ensemble results + raw counts
 
 Usage:
     python report1000.py
+Output:
+    report1000.pdf
 """
 
 import os
+import glob
+import random
 import numpy as np
 from matplotlib.backends.backend_pdf import PdfPages
 from utils import (load_models, extract_folder, make_cover,
@@ -23,8 +26,9 @@ from utils import (load_models, extract_folder, make_cover,
                    make_feature_stats_table,
                    make_ensemble_results_page,
                    make_waveform_spectrogram_page,
+                   make_averaged_signal_page,
                    load_audio, compute_stft, predict_both,
-                   AUDIO_DIR, PHYSICS_INDICES, PHYSICS_NAMES)
+                   AUDIO_DIR, PHYSICS_INDICES)
 from ching import build_advanced_feature_vector
 
 OUTPUT_PDF    = os.path.join(AUDIO_DIR, "report1000.pdf")
@@ -42,12 +46,11 @@ def main():
     print("\nLoading models...")
     clf_lr, scaler_lr, lr_relative, clf_xgb, scaler_xgb = load_models()
 
-    print("\n[1/4] Extracting features...")
+    print("\n[1/5] Extracting features...")
     print("  Real (source-vctk1k):")
     real_results, real_feats = extract_folder(
         SOURCE_DIR, "REAL", clf_lr, scaler_lr, lr_relative,
         clf_xgb, scaler_xgb, "source")
-
     print("  Spoof (converted-vctk1k):")
     spoof_results, spoof_feats = extract_folder(
         CONVERTED_DIR, "SPOOF", clf_lr, scaler_lr, lr_relative,
@@ -58,9 +61,7 @@ def main():
     n_spoof = len(spoof_results)
     print(f"\n  Total: {n_real} real + {n_spoof} spoof = {n_real+n_spoof} files")
 
-    # Sample 20 pairs for waveform/phase variance page
-    print("\n[2/4] Sampling pairs for visual analysis...")
-    import glob, random
+    print("\n[2/5] Sampling pairs for signal analysis...")
     real_files  = sorted(glob.glob(os.path.join(SOURCE_DIR,    "*.wav")))
     spoof_files = sorted(glob.glob(os.path.join(CONVERTED_DIR, "*.wav")))
     sample_n = min(20, len(real_files), len(spoof_files))
@@ -87,14 +88,14 @@ def main():
         if (i+1) % 5 == 0:
             print(f"    {i+1}/{sample_n} pairs sampled")
 
-    print("\n[3/4] Generating PDF...")
+    print("\n[3/5] Generating PDF...")
     with PdfPages(OUTPUT_PDF) as pdf:
 
         print("  → Cover")
         make_cover(pdf,
                    "VCTK 1000-Pair Analysis",
                    "In-Distribution Evaluation Report",
-                   [f"Real: {n_real} files (source-vctk1k)",
+                   [f"Real : {n_real} files (source-vctk1k)",
                     f"Spoof: {n_spoof} files (converted-vctk1k)",
                     "Models trained on source vs converted (1000 vs 1000, balanced)"])
 
@@ -109,7 +110,12 @@ def main():
             "VCTK 1000-Pair Aggregate Feature Statistics",
             n_real, n_spoof)
 
-        print("  → Waveform/phase variance summary")
+        print("  → Averaged signal analysis")
+        make_averaged_signal_page(
+            pdf, real_files, spoof_files,
+            "Averaged Signal Analysis — VCTK 1000 Pairs (50 files sampled per class)")
+
+        print("  → Signal summary (20 sampled pairs)")
         make_waveform_spectrogram_page(
             pdf, pairs_data,
             f"Signal Analysis Summary — {sample_n} Sampled Pairs")
@@ -124,7 +130,7 @@ def main():
         d["Title"]  = "VCTK 1000-Pair Analysis Report"
         d["Author"] = "Ved, Ching, Erick — EE 123"
 
-    print(f"\n[4/4] Done!")
+    print(f"\n[4/5] Done!")
     print(f"\n✅ Report saved to: {OUTPUT_PDF}")
     print("\n  Results summary:")
     for name, s in stats.items():
