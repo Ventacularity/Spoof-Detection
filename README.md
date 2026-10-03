@@ -23,7 +23,7 @@ SPARC converts a speaker's voice by swapping the speaker embedding and resynthes
 
 ## Data
 
-Built on the VCTK corpus (16 kHz). Models are trained on 1000 real vs. 1000 SPARC-converted clips (balanced). A separate 500-pair set with unseen target speakers is held out entirely for out-of-distribution testing.
+Built on the [VCTK corpus](https://datashare.ed.ac.uk/handle/10283/3443) (16 kHz). Models are trained on 1000 real vs. 1000 SPARC-converted clips (balanced). A separate 500-pair set with unseen target speakers is held out entirely for out-of-distribution testing.
 
 ## Results
 
